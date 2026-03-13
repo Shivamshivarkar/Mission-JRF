@@ -55,6 +55,72 @@ const getCategoryColor = (cat: string) => {
   return map[cat] || "#a3a3a3";
 };
 
+// ── Local Storage Helpers ─────────────────────────────────────────────────────
+const STORAGE_KEYS = {
+  USER: "litmemory_user",
+  USERS: "litmemory_users",
+  SCORES: "litmemory_scores",
+  TOKEN: "litmemory_token"
+};
+
+const getLocalUsers = (): any[] => JSON.parse(localStorage.getItem(STORAGE_KEYS.USERS) || "[]");
+const saveLocalUsers = (users: any[]) => localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
+const getLocalScores = (userId: number): UserScore[] => {
+  const allScores = JSON.parse(localStorage.getItem(STORAGE_KEYS.SCORES) || "[]");
+  return allScores.filter((s: any) => s.user_id === userId);
+};
+const saveLocalScore = (score: any) => {
+  const allScores = JSON.parse(localStorage.getItem(STORAGE_KEYS.SCORES) || "[]");
+  allScores.push({ ...score, id: Date.now(), created_at: new Date().toISOString() });
+  localStorage.setItem(STORAGE_KEYS.SCORES, JSON.stringify(allScores));
+};
+
+const calculateLocalStats = (userId: number): UserStats => {
+  const scores = getLocalScores(userId);
+  if (scores.length === 0) return { total_quizzes: 0, avg_score: 0, high_score: 0 };
+  
+  const total = scores.length;
+  const sum = scores.reduce((acc, s) => acc + (s.score * 100 / s.total), 0);
+  const high = Math.max(...scores.map(s => (s.score * 100 / s.total)));
+  
+  return {
+    total_quizzes: total,
+    avg_score: sum / total,
+    high_score: high
+  };
+};
+
+const getMockLeaderboard = (currentUser: UserData | null): LeaderboardEntry[] => {
+  const mockUsers = [
+    { username: "LiteratureLover", total_quizzes: 45, avg_score: 92, high_score: 100, total_points: 450 },
+    { username: "BookWorm99", total_quizzes: 38, avg_score: 88, high_score: 100, total_points: 380 },
+    { username: "DramaQueen", total_quizzes: 30, avg_score: 85, high_score: 90, total_points: 300 },
+    { username: "ShakespeareFan", total_quizzes: 25, avg_score: 82, high_score: 90, total_points: 250 },
+  ];
+
+  if (currentUser) {
+    const stats = calculateLocalStats(currentUser.id);
+    const userEntry = {
+      username: currentUser.username,
+      total_quizzes: stats.total_quizzes,
+      avg_score: Math.round(stats.avg_score),
+      high_score: Math.round(stats.high_score),
+      total_points: stats.total_quizzes * 10 // Simple points logic
+    };
+    
+    // Add current user if not already there (by username)
+    if (!mockUsers.find(u => u.username === userEntry.username)) {
+      mockUsers.push(userEntry);
+    } else {
+      // Update existing
+      const idx = mockUsers.findIndex(u => u.username === userEntry.username);
+      mockUsers[idx] = userEntry;
+    }
+  }
+
+  return mockUsers.sort((a, b) => b.total_points - a.total_points || b.avg_score - a.avg_score);
+};
+
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function CategoryPill({ label, active, color, onClick }: { label: string, active: boolean, color: string, onClick: () => void }) {
@@ -208,7 +274,7 @@ export default function App() {
 
   // Auth state
   const [user, setUser] = useState<UserData | null>(null);
-  const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
+  const [token, setToken] = useState<string | null>(localStorage.getItem(STORAGE_KEYS.TOKEN));
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [authMode, setAuthMode] = useState<"login" | "signup">("login");
   const [username, setUsername] = useState("");
@@ -262,49 +328,32 @@ export default function App() {
   }, [search, shuffledItems, currentItems]);
 
   useEffect(() => {
-    const storedUser = localStorage.getItem("user");
+    const storedUser = localStorage.getItem(STORAGE_KEYS.USER);
     if (storedUser && token) {
       setUser(JSON.parse(storedUser));
     }
   }, [token]);
 
   const fetchUserStats = async () => {
-    if (!token) return;
-    try {
-      const res = await fetch("/api/user/stats", {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const data = await res.json();
-      setUserStats(data);
-    } catch (e) {
-      console.error(e);
-    }
+    if (!user) return;
+    const stats = calculateLocalStats(user.id);
+    setUserStats(stats);
   };
 
   const fetchUserScores = async () => {
-    if (!token) return;
-    try {
-      const res = await fetch("/api/scores", {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      const data = await res.json();
-      setUserScores(data);
-    } catch (e) {
-      console.error(e);
-    }
+    if (!user) return;
+    const scores = getLocalScores(user.id);
+    setUserScores(scores);
   };
 
   const fetchLeaderboard = async () => {
     setIsLoadingLeaderboard(true);
-    try {
-      const res = await fetch("/api/leaderboard");
-      const data = await res.json();
-      setLeaderboard(data);
-    } catch (e) {
-      console.error(e);
-    } finally {
+    // Simulate network delay
+    setTimeout(() => {
+      const lb = getMockLeaderboard(user);
+      setLeaderboard(lb);
       setIsLoadingLeaderboard(false);
-    }
+    }, 500);
   };
 
   useEffect(() => {
@@ -320,87 +369,91 @@ export default function App() {
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError("");
-    try {
-      const endpoint = authMode === "login" ? "/api/auth/login" : "/api/auth/signup";
-      const body = authMode === "login" 
-        ? { identifier: username, password } 
-        : { username, password, phone_number: phoneNumber };
-
-      const res = await fetch(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body)
-      });
-      const data = await res.json();
-      if (data.error) {
-        setAuthError(data.error);
-      } else {
-        localStorage.setItem("token", data.token);
-        localStorage.setItem("user", JSON.stringify(data.user));
-        setToken(data.token);
-        setUser(data.user);
-        setShowAuthModal(false);
-        setUsername("");
-        setPassword("");
-        setPhoneNumber("");
+    
+    const users = getLocalUsers();
+    
+    if (authMode === "signup") {
+      if (users.find(u => u.username === username)) {
+        setAuthError("Username already exists");
+        return;
       }
-    } catch (e) {
-      setAuthError("Connection error");
+      if (users.find(u => u.phone_number === phoneNumber)) {
+        setAuthError("Phone number already registered");
+        return;
+      }
+      
+      const newUser = {
+        id: Date.now(),
+        username,
+        password, // In a real app, hash this!
+        phone_number: phoneNumber,
+        profile_photo: null,
+        about: null
+      };
+      
+      users.push(newUser);
+      saveLocalUsers(users);
+      
+      const dummyToken = "local-token-" + newUser.id;
+      localStorage.setItem(STORAGE_KEYS.TOKEN, dummyToken);
+      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(newUser));
+      setToken(dummyToken);
+      setUser(newUser);
+      setShowAuthModal(false);
+    } else {
+      const foundUser = users.find(u => (u.username === username || u.phone_number === username) && u.password === password);
+      if (!foundUser) {
+        setAuthError("Invalid username or password");
+        return;
+      }
+      
+      const dummyToken = "local-token-" + foundUser.id;
+      localStorage.setItem(STORAGE_KEYS.TOKEN, dummyToken);
+      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(foundUser));
+      setToken(dummyToken);
+      setUser(foundUser);
+      setShowAuthModal(false);
     }
+    
+    setUsername("");
+    setPassword("");
+    setPhoneNumber("");
   };
 
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError("");
-    try {
-      const res = await fetch("/api/auth/forgot-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: resetUsername, phone_number: resetPhone })
-      });
-      const data = await res.json();
-      if (data.error) {
-        setAuthError(data.error);
-      } else {
-        setAuthView("reset");
-      }
-    } catch (e) {
-      setAuthError("Connection error");
+    const users = getLocalUsers();
+    const found = users.find(u => u.username === resetUsername && u.phone_number === resetPhone);
+    if (!found) {
+      setAuthError("No user found with that username and phone number combination");
+    } else {
+      setAuthView("reset");
     }
   };
 
   const handleResetPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError("");
-    try {
-      const res = await fetch("/api/auth/reset-password", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          username: resetUsername, 
-          phone_number: resetPhone, 
-          new_password: newPassword 
-        })
-      });
-      const data = await res.json();
-      if (data.error) {
-        setAuthError(data.error);
-      } else {
-        alert("Password reset successfully! You can now login.");
-        setAuthView("login");
-        setAuthMode("login");
-        setResetUsername("");
-        setResetPhone("");
-        setNewPassword("");
-      }
-    } catch (e) {
-      setAuthError("Connection error");
+    const users = getLocalUsers();
+    const idx = users.findIndex(u => u.username === resetUsername && u.phone_number === resetPhone);
+    if (idx === -1) {
+      setAuthError("Identity verification failed");
+    } else {
+      users[idx].password = newPassword;
+      saveLocalUsers(users);
+      alert("Password reset successfully! You can now login.");
+      setAuthView("login");
+      setAuthMode("login");
+      setResetUsername("");
+      setResetPhone("");
+      setNewPassword("");
     }
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("token");
-    localStorage.removeItem("user");
+    localStorage.removeItem(STORAGE_KEYS.TOKEN);
+    localStorage.removeItem(STORAGE_KEYS.USER);
     setToken(null);
     setUser(null);
     setMode("novels");
@@ -408,49 +461,44 @@ export default function App() {
 
   const handleUpdateProfile = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!token) return;
+    if (!user) return;
     setIsUpdatingProfile(true);
-    try {
-      const res = await fetch("/api/user/profile", {
-        method: "PATCH",
-        headers: { 
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ 
-          username: editUsername,
-          profile_photo: editPhoto, 
-          about: editAbout 
-        })
-      });
+    
+    // Simulate delay
+    setTimeout(() => {
+      const users = getLocalUsers();
+      const idx = users.findIndex(u => u.id === user.id);
       
-      let data;
-      const contentType = res.headers.get("content-type");
-      if (contentType && contentType.includes("application/json")) {
-        data = await res.json();
+      if (idx === -1) {
+        handleLogout();
+        setIsUpdatingProfile(false);
+        return;
       }
-      
-      if (!res.ok) {
-        if (res.status === 404 && data?.error === "User not found") {
-          handleLogout();
-          throw new Error("Your session has expired or your account was not found. Please log in again.");
+
+      // Check username uniqueness if changed
+      if (editUsername && editUsername !== user.username) {
+        if (users.find(u => u.username === editUsername && u.id !== user.id)) {
+          alert("Username already taken");
+          setIsUpdatingProfile(false);
+          return;
         }
-        throw new Error(data?.error || `Server error: ${res.status} ${res.statusText}`);
       }
+
+      const updatedUser = {
+        ...users[idx],
+        username: editUsername || users[idx].username,
+        profile_photo: editPhoto !== null ? editPhoto : users[idx].profile_photo,
+        about: editAbout !== undefined ? editAbout : users[idx].about
+      };
+
+      users[idx] = updatedUser;
+      saveLocalUsers(users);
       
-      if (!data) {
-        throw new Error("Received empty response from server");
-      }
-      
-      setUser(data);
-      localStorage.setItem("user", JSON.stringify(data));
+      setUser(updatedUser);
+      localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(updatedUser));
       setIsEditingProfile(false);
-    } catch (e: any) {
-      console.error("Failed to update profile", e);
-      alert(e.message || "Failed to update profile. Please try again.");
-    } finally {
       setIsUpdatingProfile(false);
-    }
+    }, 800);
   };
 
   const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -534,23 +582,13 @@ export default function App() {
       setQuizFinished(true);
       
       // Save score if logged in
-      if (token) {
-        try {
-          await fetch("/api/scores", {
-            method: "POST",
-            headers: { 
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${token}`
-            },
-            body: JSON.stringify({ 
-              score, 
-              total: shuffledItems.length, 
-              type: quizType 
-            })
-          });
-        } catch (e) {
-          console.error("Failed to save score", e);
-        }
+      if (user) {
+        saveLocalScore({
+          user_id: user.id,
+          score,
+          total: shuffledItems.length,
+          type: quizType
+        });
       }
 
       if (score >= 5) {
